@@ -81,6 +81,7 @@ Current experiments include:
 * Qwen2.5-7B-Instruct
 * Llama-3.1-8B-Instruct
 * Mistral-7B-Instruct
+* Gemma2 9B
 
 The objective is not to rank models, but to investigate whether human-like biases emerge consistently across architectures.
 
@@ -98,6 +99,7 @@ The objective is not to rank models, but to investigate whether human-like biase
 * Qwen2.5-7B
 * Llama-3.1-8B
 * Mistral-7B
+* Gemma2 9B
 
 ### Analysis
 
@@ -116,28 +118,7 @@ The objective is not to rank models, but to investigate whether human-like biase
 
 ---
 
-## Repository Structure
 
-```text
-llm-cognitive-biases/
-
-├── app.py
-├── src/
-├── prompts/
-├── experiments/
-│   ├── anchoring/
-│   ├── framing/
-│   ├── conjunction/
-│   ├── base_rate/
-│   └── availability/
-├── data/
-├── analysis/
-├── figures/
-├── notebooks/
-├── paper/
-├── requirements.txt
-└── README.md
-```
 
 ---
 
