@@ -2,8 +2,11 @@ import os
 import gradio as gr
 from huggingface_hub import InferenceClient
 import pandas as pd
+import re
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# 1. Supported Models (Instruct versions for Conversational API)
+# 1. Supported Models
 MODELS = {
     "Qwen 2.5 7B": "Qwen/Qwen2.5-7B-Instruct",
     "Llama 3.1 8B": "meta-llama/Llama-3.1-8B-Instruct",
@@ -11,101 +14,108 @@ MODELS = {
     "Gemma 2 9B": "google/gemma-2-9b-it"
 }
 
-# 2. The 5 Canonical Paradigms (Prompts)
+# 2. Experimental Stimuli
 EXPERIMENTS = {
     "Anchoring (High)": "Question: Was Mahatma Gandhi older or younger than 144 when he died? How old was he? Answer with ONLY the number.",
     "Anchoring (Low)": "Question: Was Mahatma Gandhi older or younger than 9 when he died? How old was he? Answer with ONLY the number.",
-    "Framing (Gain)": "600 people are at risk. Program A: 200 people will be saved. Program B: 1/3 probability 600 saved, 2/3 probability 0 saved. Which do you choose? Answer A or B.",
-    "Framing (Loss)": "600 people are at risk. Program C: 400 people will die. Program D: 1/3 probability 0 die, 2/3 probability 600 die. Which do you choose? Answer C or D.",
-    "Conjunction Fallacy": "Linda is 31, single, outspoken, and very bright. She majored in philosophy and is concerned with social justice. Which is more probable? A) Linda is a bank teller. B) Linda is a bank teller and active in the feminist movement.",
-    "Base-Rate Neglect": "A panel of psychologists interviewed 100 people: 70 lawyers and 30 engineers. Jack is a man who likes math puzzles and carpentry. What is the probability (0-100) that Jack is an engineer?",
-    "Availability Heuristic": "In a typical English text, are there more words that begin with the letter 'K', or more words that have 'K' as their third letter? Answer A or B."
+    "Framing (Gain)": "600 people are at risk. Program A: 200 people will be saved. Program B: 1/3 probability 600 saved. Which do you choose? Answer A or B.",
+    "Framing (Loss)": "600 people are at risk. Program C: 400 people will die. Program D: 1/3 probability 0 die. Which do you choose? Answer C or D.",
+    "Conjunction Fallacy": "Linda is 31, single, outspoken, and very bright. She majored in philosophy. Which is more probable? A) Linda is a bank teller. B) Linda is a bank teller and active in the feminist movement.",
+    "Base-Rate Neglect": "70 lawyers, 30 engineers. Jack is conservative and likes math puzzles. What is the probability (0-100) that Jack is an engineer? Answer only the number.",
+    "Availability Heuristic": "Are there more words that: A) Begin with 'K' B) Have 'K' as the 3rd letter? Answer A or B."
 }
 
-def run_bias_test(model_name, bias_type, iterations):
-    # Retrieve the secret token from the environment
-    hf_token = os.environ.get("HF_TOKEN")
+def extract_value(text):
+    """Extracts either the first number or the choice A/B from the response."""
+    numbers = re.findall(r'\d+', text)
+    if numbers:
+        return float(numbers[0])
+    choices = re.findall(r'\b[A-D]\b', text.upper())
+    if choices:
+        return choices[0]
+    return text[:10] # Fallback to start of string
+
+def create_plot(df, bias_type):
+    """Generates a visualization based on the type of data returned."""
+    plt.figure(figsize=(10, 5))
+    sns.set_style("whitegrid")
     
+    # Check if data is numerical (Anchoring/Base-Rate) or categorical (Framing/Conjunction)
+    sample_val = df["Value"].iloc[0]
+    
+    if isinstance(sample_val, (int, float)):
+        # Numerical Plot (Distribution)
+        sns.histplot(data=df, x="Value", kde=True, color="purple", bins=5)
+        # Add Ground Truth for Anchoring if applicable
+        if "Anchoring" in bias_type:
+            plt.axvline(78, color='red', linestyle='--', label='Actual Age (78)')
+            plt.legend()
+        plt.title(f"Numerical Distribution: {bias_type}")
+    else:
+        # Categorical Plot (Counts)
+        sns.countplot(data=df, x="Value", palette="viridis")
+        plt.title(f"Response Frequency: {bias_type}")
+    
+    plt.tight_layout()
+    return plt.gcf()
+
+def run_bias_test(model_name, bias_type, iterations):
+    hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
-        return None, "❌ ERROR: HF_TOKEN not found. Go to Settings > Variables and secrets > New secret and add 'HF_TOKEN'."
+        return None, None, "❌ ERROR: HF_TOKEN secret missing in Settings."
 
     try:
-        # Initialize the Client
         client = InferenceClient(model=MODELS[model_name], token=hf_token)
-        results = []
-        prompt_content = EXPERIMENTS[bias_type]
+        raw_results = []
+        extracted_values = []
         
         for i in range(int(iterations)):
-            # Use chat_completion to satisfy the 'conversational' task requirement
-            messages = [{"role": "user", "content": prompt_content}]
-            
+            messages = [{"role": "user", "content": EXPERIMENTS[bias_type]}]
             response = client.chat_completion(
                 messages=messages,
-                max_tokens=30,
-                stream=False,
-                temperature=0.8 + (i * 0.02) # Add variety to responses
+                max_tokens=20,
+                temperature=0.7 + (i * 0.05)
             )
-            
-            # Extract text from the response object
-            answer = response.choices[0].message.content
-            results.append(answer.strip())
+            answer = response.choices[0].message.content.strip()
+            raw_results.append(answer)
+            extracted_values.append(extract_value(answer))
         
-        # Create DataFrame for display
         df = pd.DataFrame({
             "Iteration": list(range(1, int(iterations) + 1)),
-            "Model Response": results
+            "Raw Response": raw_results,
+            "Value": extracted_values
         })
         
-        return df, f"✅ Success! Generated {iterations} responses from {model_name}."
+        # Generate the chart
+        fig = create_plot(df, bias_type)
+        
+        return df, fig, f"✅ Success! Analyzed {iterations} samples from {model_name}."
         
     except Exception as e:
-        # Check for specific Llama 3.1 Gating error
-        if "gated" in str(e).lower():
-            return None, "❌ ERROR: You need to request access to Llama 3.1 on Hugging Face first."
-        return None, f"❌ API ERROR: {str(e)}"
+        return None, None, f"❌ API ERROR: {str(e)}"
 
-# 3. Gradio Interface Design
-with gr.Blocks(theme=gr.themes.Default(primary_hue="purple")) as demo:
-    gr.Markdown("# 🧠 LLM Cognitive Bias Laboratory")
-    gr.Markdown("Replicating classical human psychological biases in foundation models using the Inference API.")
+# 3. Enhanced UI Design
+with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
+    gr.Markdown("# 🧠 LLM Cognitive Bias Lab")
+    gr.Markdown("Visualize how Large Language Models replicate human systematic errors.")
     
     with gr.Row():
-        with gr.Column():
-            model_input = gr.Dropdown(
-                choices=list(MODELS.keys()), 
-                label="Select Large Language Model", 
-                value="Qwen 2.5 7B"
-            )
-            bias_input = gr.Dropdown(
-                choices=list(EXPERIMENTS.keys()), 
-                label="Select Bias Paradigm", 
-                value="Anchoring (High)"
-            )
-            iter_input = gr.Slider(
-                minimum=1, 
-                maximum=10, 
-                step=1, 
-                label="Number of Trials (Iterations)", 
-                value=3
-            )
+        with gr.Column(scale=1):
+            model_input = gr.Dropdown(choices=list(MODELS.keys()), label="Model", value="Qwen 2.5 7B")
+            bias_input = gr.Dropdown(choices=list(EXPERIMENTS.keys()), label="Bias Paradigm", value="Anchoring (High)")
+            iter_input = gr.Slider(minimum=2, maximum=15, step=1, label="Iterations", value=5)
             run_btn = gr.Button("🚀 Run Experiment", variant="primary")
+            status_out = gr.Textbox(label="Status")
 
-    with gr.Row():
-        with gr.Column():
-            status_out = gr.Textbox(label="Status / Error Log")
-            data_out = gr.Dataframe(label="Collected Model Data")
+        with gr.Column(scale=2):
+            plot_out = gr.Plot(label="Statistical Visualization")
+            data_out = gr.Dataframe(label="Raw Data Table")
 
-    # Connect the button to the function
     run_btn.click(
         fn=run_bias_test, 
         inputs=[model_input, bias_input, iter_input], 
-        outputs=[data_out, status_out]
+        outputs=[data_out, plot_out, status_out]
     )
 
-    gr.Markdown("---")
-    gr.Markdown("### How to use this for your portfolio:")
-    gr.Markdown("1. Select **Anchoring (High)** vs **Anchoring (Low)** and observe the mean difference.\n2. Note how the model often fails the **Conjunction Fallacy** (Linda Problem).\n3. Use these results to prove that LLMs replicate human-like 'systematic irrationality'.")
-
-# 4. Launch the app
 if __name__ == "__main__":
     demo.launch()
