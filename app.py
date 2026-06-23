@@ -1,82 +1,111 @@
+import os
 import gradio as gr
 from huggingface_hub import InferenceClient
 import pandas as pd
-import os
 
-# 1. Models - Make sure names are exact
+# 1. Supported Models (Instruct versions for Conversational API)
 MODELS = {
     "Qwen 2.5 7B": "Qwen/Qwen2.5-7B-Instruct",
-    "Llama 3.1 8B": "meta-llama/Llama-3.1-8B-Instruct"
+    "Llama 3.1 8B": "meta-llama/Llama-3.1-8B-Instruct",
+    "Mistral 7B v0.3": "mistralai/Mistral-7B-Instruct-v0.3",
+    "Gemma 2 9B": "google/gemma-2-9b-it"
 }
 
-# 2. Experiments
+# 2. The 5 Canonical Paradigms (Prompts)
 EXPERIMENTS = {
-    "Anchoring": "Question: Was Gandhi older than 144 when he died? How old was he? Answer with only the number.",
-    "Framing": "600 people are at risk. Program A: 200 saved. Program B: 1/3 chance 600 saved. Choose A or B.",
-    "Conjunction": "Linda is 31, bright, and an activist. Which is more probable? A) Bank teller B) Bank teller and feminist.",
-    "Base-Rate": "70 lawyers, 30 engineers. Jack likes math. Is Jack a lawyer or engineer?",
-    "Availability": "Which is more common: A) Words starting with 'K' B) Words with 'K' as 3rd letter?"
+    "Anchoring (High)": "Question: Was Mahatma Gandhi older or younger than 144 when he died? How old was he? Answer with ONLY the number.",
+    "Anchoring (Low)": "Question: Was Mahatma Gandhi older or younger than 9 when he died? How old was he? Answer with ONLY the number.",
+    "Framing (Gain)": "600 people are at risk. Program A: 200 people will be saved. Program B: 1/3 probability 600 saved, 2/3 probability 0 saved. Which do you choose? Answer A or B.",
+    "Framing (Loss)": "600 people are at risk. Program C: 400 people will die. Program D: 1/3 probability 0 die, 2/3 probability 600 die. Which do you choose? Answer C or D.",
+    "Conjunction Fallacy": "Linda is 31, single, outspoken, and very bright. She majored in philosophy and is concerned with social justice. Which is more probable? A) Linda is a bank teller. B) Linda is a bank teller and active in the feminist movement.",
+    "Base-Rate Neglect": "A panel of psychologists interviewed 100 people: 70 lawyers and 30 engineers. Jack is a man who likes math puzzles and carpentry. What is the probability (0-100) that Jack is an engineer?",
+    "Availability Heuristic": "In a typical English text, are there more words that begin with the letter 'K', or more words that have 'K' as their third letter? Answer A or B."
 }
 
 def run_bias_test(model_name, bias_type, iterations):
-    # GET TOKEN FROM SPACE SECRETS
+    # Retrieve the secret token from the environment
     hf_token = os.environ.get("HF_TOKEN")
     
     if not hf_token:
-        return None, "❌ Error: HF_TOKEN not found in Space Settings."
+        return None, "❌ ERROR: HF_TOKEN not found. Go to Settings > Variables and secrets > New secret and add 'HF_TOKEN'."
 
     try:
+        # Initialize the Client
         client = InferenceClient(model=MODELS[model_name], token=hf_token)
         results = []
+        prompt_content = EXPERIMENTS[bias_type]
         
         for i in range(int(iterations)):
-            # We add a slight change to each prompt to avoid 'cached' results
-            response = client.text_generation(
-                EXPERIMENTS[bias_type], 
-                max_new_tokens=20, 
-                do_sample=True, 
-                temperature=0.8 + (i * 0.01) 
+            # Use chat_completion to satisfy the 'conversational' task requirement
+            messages = [{"role": "user", "content": prompt_content}]
+            
+            response = client.chat_completion(
+                messages=messages,
+                max_tokens=30,
+                stream=False,
+                temperature=0.8 + (i * 0.02) # Add variety to responses
             )
-            results.append(response.strip())
+            
+            # Extract text from the response object
+            answer = response.choices[0].message.content
+            results.append(answer.strip())
         
-        df = pd.DataFrame(results, columns=["Model Response"])
-        return df, f"✅ Successfully generated {iterations} samples."
+        # Create DataFrame for display
+        df = pd.DataFrame({
+            "Iteration": list(range(1, int(iterations) + 1)),
+            "Model Response": results
+        })
+        
+        return df, f"✅ Success! Generated {iterations} responses from {model_name}."
         
     except Exception as e:
-        return None, f"❌ API Error: {str(e)}"
+        # Check for specific Llama 3.1 Gating error
+        if "gated" in str(e).lower():
+            return None, "❌ ERROR: You need to request access to Llama 3.1 on Hugging Face first."
+        return None, f"❌ API ERROR: {str(e)}"
 
-# Gradio Interface
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🧠 LLM Cognitive Bias Lab")
+# 3. Gradio Interface Design
+with gr.Blocks(theme=gr.themes.Default(primary_hue="purple")) as demo:
+    gr.Markdown("# 🧠 LLM Cognitive Bias Laboratory")
+    gr.Markdown("Replicating classical human psychological biases in foundation models using the Inference API.")
     
     with gr.Row():
-        model_dropdown = gr.Dropdown(choices=list(MODELS.keys()), label="Select Model", value="Qwen 2.5 7B")
-        bias_dropdown = gr.Dropdown(choices=list(EXPERIMENTS.keys()), label="Select Bias Paradigm", value="Anchoring")
-        iters = gr.Slider(minimum=1, maximum=10, step=1, label="Iterations (Keep low for free tier)", value=3)
-    
-    run_btn = gr.Button("Run Experiment", variant="primary")
-    
-    status_text = gr.Textbox(label="Status")
-    output_df = gr.Dataframe(label="Model Responses")
+        with gr.Column():
+            model_input = gr.Dropdown(
+                choices=list(MODELS.keys()), 
+                label="Select Large Language Model", 
+                value="Qwen 2.5 7B"
+            )
+            bias_input = gr.Dropdown(
+                choices=list(EXPERIMENTS.keys()), 
+                label="Select Bias Paradigm", 
+                value="Anchoring (High)"
+            )
+            iter_input = gr.Slider(
+                minimum=1, 
+                maximum=10, 
+                step=1, 
+                label="Number of Trials (Iterations)", 
+                value=3
+            )
+            run_btn = gr.Button("🚀 Run Experiment", variant="primary")
 
-    run_btn.click(run_bias_test, inputs=[model_dropdown, bias_dropdown, iters], outputs=[output_df, status_text])
-
-demo.launch()    return df, f"Generated {iterations} samples for {bias_type} using {model_name}"
-
-# Gradio Interface
-with gr.Blocks() as demo:
-    gr.Markdown("# 🧠 LLM Cognitive Bias Lab")
-    
     with gr.Row():
-        model_dropdown = gr.Dropdown(choices=list(MODELS.keys()), label="Select Model", value="Qwen 2.5 7B")
-        bias_dropdown = gr.Dropdown(choices=list(EXPERIMENTS.keys()), label="Select Bias Paradigm")
-        iters = gr.Slider(minimum=1, maximum=20, step=1, label="Iterations", value=5)
-    
-    run_btn = gr.Button("Run Experiment")
-    
-    output_text = gr.Textbox(label="Status")
-    output_df = gr.Dataframe(label="Model Responses")
+        with gr.Column():
+            status_out = gr.Textbox(label="Status / Error Log")
+            data_out = gr.Dataframe(label="Collected Model Data")
 
-    run_btn.click(run_bias_test, inputs=[model_dropdown, bias_dropdown, iters], outputs=[output_df, output_text])
+    # Connect the button to the function
+    run_btn.click(
+        fn=run_bias_test, 
+        inputs=[model_input, bias_input, iter_input], 
+        outputs=[data_out, status_out]
+    )
 
-demo.launch()
+    gr.Markdown("---")
+    gr.Markdown("### How to use this for your portfolio:")
+    gr.Markdown("1. Select **Anchoring (High)** vs **Anchoring (Low)** and observe the mean difference.\n2. Note how the model often fails the **Conjunction Fallacy** (Linda Problem).\n3. Use these results to prove that LLMs replicate human-like 'systematic irrationality'.")
+
+# 4. Launch the app
+if __name__ == "__main__":
+    demo.launch()
